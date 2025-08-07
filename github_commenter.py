@@ -198,6 +198,19 @@ def agent_diff_generation(original_code, analysis):
 
     return None, original_code
 
+import os
+
+# Temporärt växla katalog
+original_cwd = os.getcwd()
+os.chdir("/Users/gulbaran/autonom_kodgranskare/temp_repo")
+
+# Kör git-kommandon här...
+os.system("git add bad_code2.py")
+os.system("git commit -m 'fixup! auto-refactor bad_code2.py'")
+os.system("git push")
+
+# Tillbaka till originalmappen
+os.chdir(original_cwd)
 
 
 def main():

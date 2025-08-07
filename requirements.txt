@@ -5,3 +5,4 @@ radon
 bandit
 requests
 GitPython
+numpy
