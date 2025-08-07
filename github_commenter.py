@@ -86,42 +86,50 @@ def check_for_refactor_signoff(pr):
             return True
     return False
 
-def apply_fixup_commit(repo_path, pr_branch):
-    """
-    Går igenom alla .py-filer i repo, byter print() till logging.info(),
-    gör en fixup-commit och pushar.
-    """
+def agent_commit_logic_with_responses(repo_path, branch):
+    from openai import OpenAI
+    client = OpenAI()
+
+    commit_prompt = (
+        "Du är en Git-agent som skriver ett tydligt och kortfattat commit-meddelande "
+        "för en fixup-commit baserat på ändringar i Python-kod."
+    )
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": commit_prompt},
+            {"role": "user", "content": "fixup commit changes"}
+        ],
+        temperature=0.1
+    )
+
+    commit_msg = response.choices[0].message.content.strip()
+
     repo = Repo(repo_path)
     git = repo.git
 
-    changed_files = []
+    try:
+        git.commit("--fixup", "HEAD", m=commit_msg)
+        git.push("origin", branch)
+        print("✅ Fixup commit pushad med meddelande:", commit_msg)
+    except GitCommandError as e:
+        print("❌ Fel vid commit eller push:", e)
 
-    for root, _, files in os.walk(repo_path):
-        for file in files:
-            if file.endswith(".py"):
-                full_path = os.path.join(root, file)
-                with open(full_path, "r") as f:
-                    content = f.read()
+def post_pr_comment(repo_owner, repo_name, pr_number, message, github_token):
+    url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/issues/{pr_number}/comments"
+    headers = {
+        "Authorization": f"token {github_token}",
+        "Accept": "application/vnd.github+json"
+    }
+    payload = {"body": message}
+    response = requests.post(url, headers=headers, json=payload)
 
-                if "print(" in content:
-                    print(f"Refaktorerar {file}...")
-                    new_content = content.replace("print(", "logging.info(")
-                    with open(full_path, "w") as f:
-                        f.write(new_content)
-                    rel_path = os.path.relpath(full_path, repo_path)
-                    repo.git.add(rel_path)
-                    changed_files.append(rel_path)
-
-
-    if changed_files:
-        try:
-            git.commit("--fixup", "HEAD")
-            git.push("origin", pr_branch)
-            print("Fixup commit pushad!")
-        except GitCommandError as e:
-            print("Fel vid commit eller push:", e)
+    if response.status_code == 201:
+        print("📝 Kommentar publicerad på PR.")
     else:
-        print("Ingen kod att refaktorera.")
+        print(f"❌ Kunde inte posta kommentar: {response.status_code} {response.text}")
+
 
 
 def analyze_code_with_responses_api(code_text):
@@ -148,8 +156,47 @@ def generate_diff_from_analysis(original_code, analysis):
     return ""
 
 
+def extract_diff_from_analysis(analysis_text):
+    """
+    Extraherar kodblock från analys, tex Python
+    """
+    code_blocks = re.findall(r"```diff\n(.*?)\n```", analysis_text, re.DOTALL)
+    return code_blocks
+
+def apply_diff_to_code(original_code, diff_text):
+    """
+    Enkel diff-applikation:
+    För tillfället hanterar vi endast ett vanligt scenario: 
+    ersätt 'print(' med 'logging.info(' om diffen innehåller det.
+    """
+    if "print(" in original_code and "logging.info(" in diff_text:
+        return original_code.replace("print(", "logging.info(")
+    return original_code
+
 def agent_diff_generation(original_code, analysis):
-    return generate_diff_from_analysis(original_code, analysis)
+    print("===ANALYSIS FROM GPT===")
+    print(analysis)
+
+    # Försök extrahera ny kod från analysen
+    code_blocks = extract_diff_from_analysis(analysis)
+    print(f"[DEBUG] Extracted code blocks: {code_blocks}")
+
+    if code_blocks:
+        new_code = code_blocks[0].strip()
+        if new_code != original_code.strip():
+            print("[DEBUG] Förbättrad kod extraherad och skiljer sig från originalet.")
+            return "[FULL FILE REPLACEMENT]", new_code
+        else:
+            print("[DEBUG] Förbättrad kod är identisk med originalet.")
+            return None, original_code
+
+    # Fallback
+    print("[DEBUG] Inga kodblock hittades. Försöker fallback...")
+    if "byt ut print(" in analysis.lower():
+        new_code = original_code.replace("print(", "logging.info(")
+        return "[fallback]", new_code
+
+    return None, original_code
 
 
 
@@ -176,6 +223,8 @@ def main():
             repo = Repo(repo_path)
             repo.git.checkout(pr_branch)
             repo.remotes.origin.pull()
+
+        changed_any_files = False
         
         # Här läser vi in varje fil från det klonade repot och anropar Responses API
         for file in files:
@@ -194,27 +243,35 @@ def main():
             analysis = agent_static_analysis(code)
             print(f"Response från Responses API för {filename}:\n{analysis}\n")
 
-            diff = agent_diff_generation(code, analysis)
+            diff, new_code= agent_diff_generation(code, analysis)
             print(f"Genererad diff för {filename}:\n{diff}\n")
 
-            if diff:
-                # Enkel tillämpning av diff: ersätt print med logging.info
-                new_code = code.replace("print(", "logging.info(")
+            if new_code and new_code != code:
                 with open(full_path, "w") as f:
                     f.write(new_code)
+                print(f"✏️ Uppdaterade {filename} med föreslagna ändringar.")
+                changed_any_files = True
+            else:
+                print(f"Inga ändringar för {filename}.")
+        if changed_any_files:
+            print("\n Utför fixup-commit och push..")
+            commit_msg = agent_commit_logic_with_responses(repo_path, pr_branch)
 
-            # TODO: Parsning och applicering av diff från 'analysis' till filen (kan vara nästa steg)
+            post_pr_comment(
+                repo_owner,
+                repo_name,
+                pr["number"],
+                f"Fixup-commit skapad med meddelande:\n\n```{commit_msg}",
+                GITHUB_TOKEN
+            )
+        else:
+            print("Ingen fil ändrades - ingen fixup-commit behövs")
 
-        
-        apply_fixup_commit(repo_path, pr_branch)
     else:
-        print("Ingen refactor sign-off, fortsätter med kommentarer...")
-
-    
-    for file in files:
-        analyze_patch_and_comment(pr, file)
+        print("💬 Ingen refactor-signoff hittad, lägger till inline-kommentarer.")
+        for file in files:
+            analyze_patch_and_comment(pr, file)
 
 if __name__ == "__main__":
     main()
-
 
