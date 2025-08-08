@@ -5,6 +5,7 @@ from git import Repo, GitCommandError
 import tempfile
 from openai import OpenAI
 import re
+from run_tests_with_coverage  import auto_generate_tests_if_low_coverage
 
 
 load_dotenv()
@@ -284,6 +285,23 @@ def main():
         print("💬 Ingen refactor-signoff hittad, lägger till inline-kommentarer.")
         for file in files:
             analyze_patch_and_comment(pr, file)
+            
+    generated, affected = auto_generate_tests_if_low_coverage()
+    
+    if generated:
+        test_list = "\n".join(f"- `{file}`" for file in affected)
+        post_pr_comment(
+            repo_owner,
+            repo_name,
+            pr["number"],
+            f"🧪 Coverage var under 75 %. Genererade automatiska enhetstester för:\n{test_list}",
+            GITHUB_TOKEN
+            
+        )
+        
+    else:
+        print("✅ Coverage OK – ingen kommentar postas.")
+
 
 if __name__ == "__main__":
     main()

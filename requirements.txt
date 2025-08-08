@@ -6,3 +6,4 @@ bandit
 requests
 GitPython
 numpy
+coverage
